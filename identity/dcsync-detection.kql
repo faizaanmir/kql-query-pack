@@ -1,0 +1,62 @@
+// ============================================================
+// DCSync Attack Detection
+// ============================================================
+// Description:
+//   Detects DCSync attacks by identifying Directory Replication
+//   Service (DRS) requests from hosts that are NOT Domain Controllers.
+//   Attackers with sufficient privileges (Domain Admin, SYSTEM, or
+//   accounts with Replicating Directory Changes rights) can abuse
+//   this to extract password hashes for all domain accounts,
+//   including KRBTGT — enabling Golden Ticket attacks.
+//
+// MITRE ATT&CK:
+//   Tactic:    Credential Access (TA0006)
+//   Technique: T1003.006 - OS Credential Dumping: DCSync
+//
+// Data Source:
+//   Microsoft Sentinel: SecurityEvent
+//   Requires:           Advanced Audit Policy — Directory Service Access (Event 4662)
+//
+// Tuning Notes:
+//   - Populate the dc_list variable with your Domain Controller hostnames/IPs.
+//   - Legitimate replication only occurs FROM DCs TO DCs. Any non-DC source is suspicious.
+//   - Properties GUIDs below correspond to DS-Replication-Get-Changes and
+//     DS-Replication-Get-Changes-All — both are required for a full DCSync.
+//   - False positives: Azure AD Connect, DirSync, or legitimate backup solutions
+//     may trigger this. Identify and allowlist them.
+// ============================================================
+
+let dc_list = dynamic(["dc01", "dc02", "dc03"]);  // Replace with your DC names
+
+SecurityEvent
+| where TimeGenerated >= ago(24h)
+| where EventID == 4662                           // Operation performed on AD object
+| where ObjectType has "domainDNS"
+| where Properties has_any (
+    "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2",      // DS-Replication-Get-Changes
+    "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2",      // DS-Replication-Get-Changes-All
+    "89e95b76-444d-4c62-991a-0facbeda640c"        // DS-Replication-Get-Changes-In-Filtered-Set
+    )
+| where not(Computer in~ (dc_list))              // Exclude known DCs
+| where SubjectUserName !endswith "$"             // Optionally exclude machine accounts (review first)
+| project
+    TimeGenerated,
+    SourceHost = Computer,
+    RequestingAccount = SubjectUserName,
+    SubjectDomainName,
+    ObjectName,
+    Properties,
+    IpAddress,
+    LogonId
+| sort by TimeGenerated desc
+
+// ============================================================
+// Defender XDR (Advanced Hunting) equivalent:
+// ============================================================
+//
+// IdentityDirectoryEvents
+// | where Timestamp >= ago(24h)
+// | where ActionType == "Directory Service replication"
+// | where not(DeviceName in~ (dc_list))
+// | project Timestamp, DeviceName, AccountName, AccountDomain, AdditionalFields
+// | sort by Timestamp desc
