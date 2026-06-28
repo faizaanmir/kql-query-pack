@@ -1,0 +1,77 @@
+// ============================================================
+// Suspicious HTA File Execution via mshta.exe
+// ============================================================
+// Description:
+//   Detects execution of HTML Application (.hta) files via mshta.exe
+//   from suspicious locations (Downloads, Temp, AppData, network shares).
+//   HTA files execute with full trust by the Windows Script Host and
+//   are commonly used in phishing and malware delivery chains to bypass
+//   browser security controls and execute arbitrary VBScript/JScript.
+//
+// MITRE ATT&CK:
+//   Tactic:    Execution (TA0002), Defense Evasion (TA0005)
+//   Technique: T1218.005 - System Binary Proxy Execution: Mshta
+//
+// Data Source:
+//   Microsoft Defender XDR: DeviceProcessEvents
+//   Microsoft Sentinel:     SecurityEvent (with Sysmon, Event ID 1)
+//
+// Tuning Notes:
+//   - mshta.exe executing from System32 against known legitimate paths may be benign.
+//   - High-fidelity signal: mshta.exe spawning cmd.exe, powershell.exe, or wscript.exe.
+//   - Look for parent process: email clients (outlook.exe), browsers, or office apps
+//     as a sign of phishing delivery.
+//   - Network-sourced HTA files (http://, \\\\share\\) are almost always malicious.
+// ============================================================
+
+// --- Defender XDR (Advanced Hunting) ---
+DeviceProcessEvents
+| where Timestamp >= ago(7d)
+| where FileName =~ "mshta.exe"
+| where ProcessCommandLine has_any (
+    ".hta",
+    "http://",
+    "https://",
+    "ftp://",
+    "\\\\"                                         // UNC/network path
+    )
+| where ProcessCommandLine has_any (
+    "\\Downloads\\",
+    "\\Temp\\",
+    "\\AppData\\",
+    "\\Public\\",
+    "%temp%",
+    "%appdata%"
+    )
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    InitiatingProcessFileName,                    // Parent process — key IOC
+    InitiatingProcessCommandLine,
+    FileName,
+    ProcessCommandLine,
+    FolderPath,
+    SHA256
+| sort by Timestamp desc
+
+// ============================================================
+// Microsoft Sentinel (Sysmon Event ID 1) equivalent:
+// ============================================================
+//
+// Event
+// | where TimeGenerated >= ago(7d)
+// | where Source == "Microsoft-Windows-Sysmon"
+// | where EventID == 1
+// | extend
+//     Image = tostring(EventData.Image),
+//     CommandLine = tostring(EventData.CommandLine),
+//     ParentImage = tostring(EventData.ParentImage),
+//     ParentCommandLine = tostring(EventData.ParentCommandLine),
+//     User = tostring(EventData.User),
+//     Computer
+// | where Image endswith "mshta.exe"
+// | where CommandLine has_any (".hta", "http://", "https://", "\\\\")
+// | where CommandLine has_any ("\\Downloads\\", "\\Temp\\", "\\AppData\\")
+// | project TimeGenerated, Computer, User, ParentImage, Image, CommandLine
+// | sort by TimeGenerated desc
