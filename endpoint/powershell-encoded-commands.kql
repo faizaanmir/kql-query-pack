@@ -1,0 +1,85 @@
+// ============================================================
+// PowerShell Encoded / Obfuscated Command Detection
+// ============================================================
+// Description:
+//   Detects PowerShell execution using encoding or obfuscation flags
+//   commonly used by attackers to evade script block logging and
+//   hide malicious payloads. Flags: -EncodedCommand, -Enc, -En,
+//   -ec and variations. Also detects common obfuscation indicators
+//   such as IEX (Invoke-Expression), DownloadString, and
+//   FromBase64String.
+//
+// MITRE ATT&CK:
+//   Tactic:    Execution (TA0002), Defense Evasion (TA0005)
+//   Technique: T1059.001 - Command and Scripting Interpreter: PowerShell
+//              T1027     - Obfuscated Files or Information
+//
+// Data Source:
+//   Microsoft Defender XDR: DeviceProcessEvents
+//   Microsoft Sentinel:     SecurityEvent (Event ID 4688 with command line logging)
+//                           Or Sysmon Event ID 1
+//
+// Tuning Notes:
+//   - Encoded commands are used by some legitimate tools (SCCM, Intune, etc.)
+//   - Build an allowlist of known-good parent processes and command hashes.
+//   - Combine with DeviceEvents (PowerShell ScriptBlockLogging) for decoded content.
+//   - IEX + DownloadString in the same command is a near-certain malicious indicator.
+// ============================================================
+
+// --- Defender XDR (Advanced Hunting) ---
+DeviceProcessEvents
+| where Timestamp >= ago(7d)
+| where FileName in~ ("powershell.exe", "pwsh.exe")
+| where ProcessCommandLine has_any (
+    "-EncodedCommand",
+    "-Encoded",
+    " -Enc ",
+    " -En ",
+    " -ec ",
+    " -e "                                         // Short form, noisy — tune carefully
+    )
+    or ProcessCommandLine has_any (
+    "IEX",
+    "Invoke-Expression",
+    "DownloadString",
+    "FromBase64String",
+    "Net.WebClient",
+    "WebRequest",
+    "Reflection.Assembly"
+    )
+| extend
+    IsEncoded = ProcessCommandLine has_any ("-EncodedCommand", "-Encoded", "-Enc", "-En", "-ec"),
+    HasIEX = ProcessCommandLine has_any ("IEX", "Invoke-Expression"),
+    HasDownload = ProcessCommandLine has_any ("DownloadString", "Net.WebClient", "WebRequest"),
+    HasReflection = ProcessCommandLine has "Reflection.Assembly"
+| project
+    Timestamp,
+    DeviceName,
+    AccountName,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine,
+    ProcessCommandLine,
+    IsEncoded,
+    HasIEX,
+    HasDownload,
+    HasReflection,
+    SHA256
+| extend RiskScore = toint(IsEncoded) + toint(HasIEX) + toint(HasDownload) + toint(HasReflection)
+| sort by RiskScore desc, Timestamp desc
+
+// ============================================================
+// Sentinel (Event ID 4688) equivalent:
+// ============================================================
+//
+// SecurityEvent
+// | where TimeGenerated >= ago(7d)
+// | where EventID == 4688
+// | where NewProcessName endswith "powershell.exe"
+//     or NewProcessName endswith "pwsh.exe"
+// | where CommandLine has_any (
+//     "-EncodedCommand", "-Enc ", "-En ", "-ec ",
+//     "IEX", "Invoke-Expression", "DownloadString",
+//     "FromBase64String", "Net.WebClient"
+//     )
+// | project TimeGenerated, Computer, SubjectUserName, NewProcessName, CommandLine
+// | sort by TimeGenerated desc
